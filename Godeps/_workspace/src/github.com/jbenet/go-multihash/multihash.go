@@ -53,6 +53,7 @@ var Codes = map[int]string{
 	SHA2_256: "sha2-256",
 	SHA2_512: "sha2-512",
 	SHA3:     "sha3",
+	DSHA2_256:"dsha2-256",
 	BLAKE2B:  "blake2b",
 	BLAKE2S:  "blake2s",
 }
