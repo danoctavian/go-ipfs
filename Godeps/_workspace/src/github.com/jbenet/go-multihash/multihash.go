@@ -31,6 +31,7 @@ const (
 	SHA2_256 = 0x12
 	SHA2_512 = 0x13
 	SHA3     = 0x14
+	DSHA2_256= 0x15 // double application of SHA_256
 	BLAKE2B  = 0x40
 	BLAKE2S  = 0x41
 )
@@ -41,6 +42,7 @@ var Names = map[string]int{
 	"sha2-256": SHA2_256,
 	"sha2-512": SHA2_512,
 	"sha3":     SHA3,
+	"dsha2-256": DSHA2_256,
 	"blake2b":  BLAKE2B,
 	"blake2s":  BLAKE2S,
 }
@@ -61,6 +63,7 @@ var DefaultLengths = map[int]int{
 	SHA2_256: 32,
 	SHA2_512: 64,
 	SHA3:     64,
+	DSHA2_256: 32,
 	BLAKE2B:  64,
 	BLAKE2S:  32,
 }

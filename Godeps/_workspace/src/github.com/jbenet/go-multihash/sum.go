@@ -29,6 +29,8 @@ func Sum(data []byte, code int, length int) (Multihash, error) {
 		d = sumSHA512(data)
 	case SHA3:
 		d, err = sumSHA3(data)
+	case DSHA2_256:
+		d = sumDSHA256(data)		
 	default:
 		return m, ErrSumNotSupported
 	}
@@ -70,3 +72,8 @@ func sumSHA3(data []byte) ([]byte, error) {
 	}
 	return h.Sum(nil), nil
 }
+
+func sumDSHA256(data []byte) []byte {
+	return sumSHA256(sumSHA256(data))
+}
+
