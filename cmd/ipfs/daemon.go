@@ -6,6 +6,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -18,6 +19,7 @@ import (
 	commands "github.com/ipfs/go-ipfs/core/commands"
 	corehttp "github.com/ipfs/go-ipfs/core/corehttp"
 	"github.com/ipfs/go-ipfs/core/corerouting"
+	conn "github.com/ipfs/go-ipfs/p2p/net/conn"
 	peer "github.com/ipfs/go-ipfs/p2p/peer"
 	fsrepo "github.com/ipfs/go-ipfs/repo/fsrepo"
 	util "github.com/ipfs/go-ipfs/util"
@@ -31,7 +33,8 @@ const (
 	writableKwd               = "writable"
 	ipfsMountKwd              = "mount-ipfs"
 	ipnsMountKwd              = "mount-ipns"
-	unrestrictedApiAccess     = "unrestricted-api"
+	unrestrictedApiAccessKwd  = "unrestricted-api"
+	unencryptTransportKwd     = "disable-transport-encryption"
 	// apiAddrKwd    = "address-api"
 	// swarmAddrKwd  = "address-swarm"
 )
@@ -65,7 +68,13 @@ in the network, use 0.0.0.0 as the ip address:
 
 Be careful if you expose the API. It is a security risk, as anyone could control
 your node remotely. If you need to control the node remotely, make sure to protect
-the port as you would other services or database (firewall, authenticated proxy, etc).`,
+the port as you would other services or database (firewall, authenticated proxy, etc).
+
+In order to explicitly allow Cross-Origin requests, export the root url as
+environment variable API_ORIGIN.  For example, to allow a local server at port 8888,
+run this then restart the daemon:
+
+   export API_ORIGIN="http://localhost:8888/`,
 	},
 
 	Options: []cmds.Option{
@@ -75,7 +84,8 @@ the port as you would other services or database (firewall, authenticated proxy,
 		cmds.BoolOption(writableKwd, "Enable writing objects (with POST, PUT and DELETE)"),
 		cmds.StringOption(ipfsMountKwd, "Path to the mountpoint for IPFS (if using --mount)"),
 		cmds.StringOption(ipnsMountKwd, "Path to the mountpoint for IPNS (if using --mount)"),
-		cmds.BoolOption(unrestrictedApiAccess, "Allow API access to unlisted hashes"),
+		cmds.BoolOption(unrestrictedApiAccessKwd, "Allow API access to unlisted hashes"),
+		cmds.BoolOption(unencryptTransportKwd, "Disable transport encryption (for debugging protocols)"),
 
 		// TODO: add way to override addresses. tricky part: updating the config if also --init.
 		// cmds.StringOption(apiAddrKwd, "Address for the daemon rpc API (overrides config)"),
@@ -108,6 +118,14 @@ func daemonFunc(req cmds.Request, res cmds.Response) {
 			fmt.Println("Received interrupt signal, shutting down...")
 		}
 	}()
+
+	// check transport encryption flag.
+	unencrypted, _, _ := req.Option(unencryptTransportKwd).Bool()
+	if unencrypted {
+		log.Warningf(`Running with --%s: All connections are UNENCRYPTED.
+		You will not be able to connect to regular encrypted networks.`, unencryptTransportKwd)
+		conn.EncryptConnections = false
+	}
 
 	// first, whether user has provided the initialization flag. we may be
 	// running in an uninitialized state.
@@ -178,6 +196,8 @@ func daemonFunc(req cmds.Request, res cmds.Response) {
 		res.SetError(err, cmds.ErrNormal)
 		return
 	}
+
+	printSwarmAddrs(node)
 
 	defer func() {
 		// We wait for the node to close first, as the node has children
@@ -256,9 +276,9 @@ func serveHTTPApi(req cmds.Request) (error, <-chan error) {
 	apiMaddr = apiLis.Multiaddr()
 	fmt.Printf("API server listening on %s\n", apiMaddr)
 
-	unrestricted, _, err := req.Option(unrestrictedApiAccess).Bool()
+	unrestricted, _, err := req.Option(unrestrictedApiAccessKwd).Bool()
 	if err != nil {
-		return fmt.Errorf("serveHTTPApi: Option(%s) failed: %s", unrestrictedApiAccess, err), nil
+		return fmt.Errorf("serveHTTPApi: Option(%s) failed: %s", unrestrictedApiAccessKwd, err), nil
 	}
 
 	apiGw := corehttp.NewGateway(corehttp.GatewayConfig{
@@ -286,6 +306,7 @@ func serveHTTPApi(req cmds.Request) (error, <-chan error) {
 		defaultMux("/debug/vars"),
 		defaultMux("/debug/pprof/"),
 		corehttp.LogOption(),
+		corehttp.PrometheusOption("/debug/metrics/prometheus"),
 	}
 
 	if len(cfg.Gateway.RootRedirect) > 0 {
@@ -303,6 +324,19 @@ func serveHTTPApi(req cmds.Request) (error, <-chan error) {
 		close(errc)
 	}()
 	return nil, errc
+}
+
+// printSwarmAddrs prints the addresses of the host
+func printSwarmAddrs(node *core.IpfsNode) {
+	var addrs []string
+	for _, addr := range node.PeerHost.Addrs() {
+		addrs = append(addrs, addr.String())
+	}
+	sort.Sort(sort.StringSlice(addrs))
+
+	for _, addr := range addrs {
+		fmt.Printf("Swarm listening on %s\n", addr)
+	}
 }
 
 // serveHTTPGateway collects options, creates listener, prints status message and starts serving requests

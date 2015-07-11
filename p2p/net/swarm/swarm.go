@@ -14,17 +14,27 @@ import (
 	peer "github.com/ipfs/go-ipfs/p2p/peer"
 	eventlog "github.com/ipfs/go-ipfs/thirdparty/eventlog"
 
-	ctxgroup "github.com/ipfs/go-ipfs/Godeps/_workspace/src/github.com/jbenet/go-ctxgroup"
 	ma "github.com/ipfs/go-ipfs/Godeps/_workspace/src/github.com/jbenet/go-multiaddr"
 	ps "github.com/ipfs/go-ipfs/Godeps/_workspace/src/github.com/jbenet/go-peerstream"
 	pst "github.com/ipfs/go-ipfs/Godeps/_workspace/src/github.com/jbenet/go-peerstream/transport"
 	psy "github.com/ipfs/go-ipfs/Godeps/_workspace/src/github.com/jbenet/go-peerstream/transport/yamux"
+	"github.com/ipfs/go-ipfs/Godeps/_workspace/src/github.com/jbenet/goprocess"
+	goprocessctx "github.com/ipfs/go-ipfs/Godeps/_workspace/src/github.com/jbenet/goprocess/context"
+	prom "github.com/ipfs/go-ipfs/Godeps/_workspace/src/github.com/prometheus/client_golang/prometheus"
+	mafilter "github.com/ipfs/go-ipfs/Godeps/_workspace/src/github.com/whyrusleeping/multiaddr-filter"
 	context "github.com/ipfs/go-ipfs/Godeps/_workspace/src/golang.org/x/net/context"
 )
 
 var log = eventlog.Logger("swarm2")
 
 var PSTransport pst.Transport
+
+var peersTotal = prom.NewGaugeVec(prom.GaugeOpts{
+	Namespace: "ipfs",
+	Subsystem: "p2p",
+	Name:      "peers_total",
+	Help:      "Number of connected peers",
+}, []string{"peer_id"})
 
 func init() {
 	tpt := *psy.DefaultTransport
@@ -54,8 +64,9 @@ type Swarm struct {
 	// filters for addresses that shouldnt be dialed
 	Filters *filter.Filters
 
-	cg  ctxgroup.ContextGroup
-	bwc metrics.Reporter
+	proc goprocess.Process
+	ctx  context.Context
+	bwc  metrics.Reporter
 }
 
 // NewSwarm constructs a Swarm, with a Chan.
@@ -71,16 +82,20 @@ func NewSwarm(ctx context.Context, listenAddrs []ma.Multiaddr,
 		swarm:   ps.NewSwarm(PSTransport),
 		local:   local,
 		peers:   peers,
-		cg:      ctxgroup.WithContext(ctx),
+		ctx:     ctx,
 		dialT:   DialTimeout,
 		notifs:  make(map[inet.Notifiee]ps.Notifiee),
 		bwc:     bwc,
-		Filters: new(filter.Filters),
+		Filters: filter.NewFilters(),
 	}
 
 	// configure Swarm
-	s.cg.SetTeardown(s.teardown)
+	s.proc = goprocessctx.WithContextAndTeardown(ctx, s.teardown)
 	s.SetConnHandler(nil) // make sure to setup our own conn handler.
+
+	// setup swarm metrics
+	prom.MustRegisterOrGet(peersTotal)
+	s.Notify((*metricsNotifiee)(s))
 
 	return s, s.listen(listenAddrs)
 }
@@ -89,7 +104,15 @@ func (s *Swarm) teardown() error {
 	return s.swarm.Close()
 }
 
-// CtxGroup returns the Context Group of the swarm
+func (s *Swarm) AddAddrFilter(f string) error {
+	m, err := mafilter.NewMask(f)
+	if err != nil {
+		return err
+	}
+
+	s.Filters.AddDialFilter(m)
+	return nil
+}
 func filterAddrs(listenAddrs []ma.Multiaddr) ([]ma.Multiaddr, error) {
 	if len(listenAddrs) > 0 {
 		filtered := addrutil.FilterUsableAddrs(listenAddrs)
@@ -101,7 +124,6 @@ func filterAddrs(listenAddrs []ma.Multiaddr) ([]ma.Multiaddr, error) {
 	return listenAddrs, nil
 }
 
-// CtxGroup returns the Context Group of the swarm
 func (s *Swarm) Listen(addrs ...ma.Multiaddr) error {
 	addrs, err := filterAddrs(addrs)
 	if err != nil {
@@ -111,14 +133,19 @@ func (s *Swarm) Listen(addrs ...ma.Multiaddr) error {
 	return s.listen(addrs)
 }
 
-// CtxGroup returns the Context Group of the swarm
-func (s *Swarm) CtxGroup() ctxgroup.ContextGroup {
-	return s.cg
+// Process returns the Process of the swarm
+func (s *Swarm) Process() goprocess.Process {
+	return s.proc
+}
+
+// Context returns the context of the swarm
+func (s *Swarm) Context() context.Context {
+	return s.ctx
 }
 
 // Close stops the Swarm.
 func (s *Swarm) Close() error {
-	return s.cg.Close()
+	return s.proc.Close()
 }
 
 // StreamSwarm returns the underlying peerstream.Swarm
@@ -272,4 +299,23 @@ func (n *ps2netNotifee) OpenedStream(s *ps.Stream) {
 
 func (n *ps2netNotifee) ClosedStream(s *ps.Stream) {
 	n.not.ClosedStream(n.net, inet.Stream((*Stream)(s)))
+}
+
+type metricsNotifiee Swarm
+
+func (nn *metricsNotifiee) Connected(n inet.Network, v inet.Conn) {
+	peersTotalGauge(n.LocalPeer()).Set(float64(len(n.Conns())))
+}
+
+func (nn *metricsNotifiee) Disconnected(n inet.Network, v inet.Conn) {
+	peersTotalGauge(n.LocalPeer()).Set(float64(len(n.Conns())))
+}
+
+func (nn *metricsNotifiee) OpenedStream(n inet.Network, v inet.Stream) {}
+func (nn *metricsNotifiee) ClosedStream(n inet.Network, v inet.Stream) {}
+func (nn *metricsNotifiee) Listen(n inet.Network, a ma.Multiaddr)      {}
+func (nn *metricsNotifiee) ListenClose(n inet.Network, a ma.Multiaddr) {}
+
+func peersTotalGauge(id peer.ID) prom.Gauge {
+	return peersTotal.With(prom.Labels{"peer_id": id.Pretty()})
 }
